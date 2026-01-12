@@ -5,7 +5,7 @@ import { supabase, auth, db } from './supabaseClient';
 export default function ROISelfAssessment() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState('assessment'); // 'assessment' | 'history' | 'auth'
+  const [view, setView] = useState('assessment');
   const [history, setHistory] = useState([]);
   const [showAuthPrompt, setShowAuthPrompt] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
@@ -68,11 +68,9 @@ export default function ROISelfAssessment() {
     }
   }, [user, view]);
 
-  // 저장 횟수 체크 (3회 이상이면 계정 연결 권장)
   useEffect(() => {
     const savedCount = parseInt(localStorage.getItem('roi_save_count') || '0');
     if (savedCount >= 3 && !user?.email && !showAuthPrompt) {
-      // 익명 사용자가 3회 이상 저장하면 계정 연결 권장
       setTimeout(() => {
         if (confirm('🎯 3번째 진단을 완료했습니다!\n\n데이터를 안전하게 보관하고 여러 기기에서 사용하시겠어요?\n\n계정 연결을 추천드립니다.')) {
           setView('auth');
@@ -86,13 +84,11 @@ export default function ROISelfAssessment() {
       let currentUser = await auth.getCurrentUser();
       
       if (!currentUser) {
-        // 익명 로그인 시도
         try {
           const { user: anonymousUser } = await auth.signInAnonymously();
           currentUser = anonymousUser;
         } catch (error) {
           console.error('익명 로그인 실패:', error);
-          // 익명 로그인 실패 시 로컬 스토리지 사용
           const localUserId = localStorage.getItem('local_user_id') || `local_${Date.now()}`;
           localStorage.setItem('local_user_id', localUserId);
           currentUser = { id: localUserId, is_local: true };
@@ -102,7 +98,6 @@ export default function ROISelfAssessment() {
       setUser(currentUser);
     } catch (error) {
       console.error('인증 오류:', error);
-      // 폴백: 로컬 스토리지 사용
       const localUserId = localStorage.getItem('local_user_id') || `local_${Date.now()}`;
       localStorage.setItem('local_user_id', localUserId);
       setUser({ id: localUserId, is_local: true });
@@ -139,7 +134,6 @@ export default function ROISelfAssessment() {
     try {
       await auth.signOut();
       setUser(null);
-      // 익명으로 다시 시작
       await checkUser();
       alert('✅ 로그아웃 완료');
     } catch (error) {
@@ -152,11 +146,9 @@ export default function ROISelfAssessment() {
     
     try {
       if (user.is_local) {
-        // 로컬 저장소에서 로드
         const localHistory = JSON.parse(localStorage.getItem('roi_history') || '[]');
         setHistory(localHistory.sort((a, b) => new Date(b.assessment_date) - new Date(a.assessment_date)));
       } else {
-        // Supabase에서 로드
         const data = await db.getRecentAssessments(user.id, 20);
         setHistory(data);
       }
@@ -214,6 +206,181 @@ export default function ROISelfAssessment() {
     return { type: '⚠️ 관리 필요형', desc: '기본 관리 강화', color: '#fef3c7' };
   }
 
+  // 판정별 상세 가이드
+  function getDetailedGuidance() {
+    const judgment = getJudgment();
+    const quadrant = getQuadrant();
+    const cScore = getSectionTotal('C');
+    const dScore = getSectionTotal('D');
+    const eScore = getSectionTotal('E');
+
+    const guidanceMap = {
+      '🌟 건강한 성장형': {
+        state: '완벽한 상태입니다. 즐기면서 성장하고 있으며, 그 과정을 정량화하고 있습니다.',
+        characteristics: [
+          '✅ 기록이 체계적으로 존재함',
+          '✅ 명확한 성장 추세 확인 가능',
+          '✅ 선언과 행동이 일치함'
+        ],
+        guide: [
+          '📌 현재 방식을 유지하세요',
+          '📌 주기적으로 진단하여 패턴 확인 (월 1회 권장)',
+          '📌 다른 활동에도 이 프레임워크 적용 고려',
+          '📌 성장 스토리를 다른 사람과 공유'
+        ]
+      },
+      '📈 성장 가능형': {
+        state: '성장 의도가 있고 실행 중이나, 측정이 부족합니다.',
+        characteristics: [
+          cScore < 7 ? '⚠️ 기록이 부족함' : '✅ 기록 존재',
+          dScore < 7 ? '⚠️ 변화 측정이 어려움' : '✅ 변화 측정 가능',
+          eScore < 4 ? '⚠️ 선언-행동 불일치' : '✅ 선언-행동 일치'
+        ],
+        guide: [
+          cScore < 7 ? '📌 정량적 지표 3개 이상 설정 (숫자/사진/기록)' : '📌 기록을 더 세밀하게',
+          dScore < 7 ? '📌 3개월 단위로 Before/After 비교' : '📌 변화 원인 분석 강화',
+          eScore < 4 ? '📌 "바빠서" 변명 줄이기, 실제 시간 투자' : '📌 일관성 유지',
+          '📌 주 1회 체크인으로 진행 상황 확인'
+        ]
+      },
+      '⚠️ 메타인지 부족형': {
+        state: '성장 의도는 있지만, 체계적 접근이 부족합니다.',
+        characteristics: [
+          '⚠️ 기록이 거의 없음',
+          '⚠️ 성장 여부를 감으로만 판단',
+          '⚠️ 방법론 개선 필요'
+        ],
+        guide: [
+          '📌 즉시 시작: 정량 지표 3개 정하기',
+          '📌 예시: 운동 → (1)체중 (2)벤치프레스 무게 (3)러닝 시간',
+          '📌 매주 일요일 저녁 기록 습관',
+          '📌 사진으로 남기기 (숫자보다 쉬움)',
+          '📌 1개월 후 재진단'
+        ]
+      },
+      '🚫 회피형': {
+        state: '심각: 선언만 하고 행동하지 않는 패턴입니다.',
+        characteristics: [
+          '🚨 기록 전무',
+          '🚨 실제 시간 투자 매우 적음',
+          '🚨 "바빠서", "다음에" 반복'
+        ],
+        guide: [
+          '📌 현실 직시: 정말 이 활동을 원하는가?',
+          '📌 원한다면: 하루 15분부터 시작',
+          '📌 SNS 인증보다 실제 행동',
+          '📌 멘토/코치 찾기 (책임감 확보)',
+          '📌 2주 후 재진단 (행동 변화 확인)'
+        ]
+      },
+      '💚 건강한 향유형': {
+        state: '완벽합니다. 즐기는 것 자체가 목적이며, 압박 없이 즐기고 있습니다.',
+        characteristics: [
+          '✅ 수익화 압박 없음',
+          '✅ 성장 압박 없음',
+          '✅ 순수하게 향유'
+        ],
+        guide: [
+          '📌 ROI 측정 불필요',
+          '📌 현재처럼 즐기세요',
+          '📌 압박 느끼면 오히려 해로움',
+          '📌 이 활동은 "쉼"의 역할'
+        ]
+      },
+      '💭 무심형': {
+        state: '즐기고는 있지만, 의식적이지 않습니다.',
+        characteristics: [
+          '✅ 수익화 압박 없음',
+          '✅ 성장 압박 없음',
+          '⚠️ 기록/측정 없음'
+        ],
+        guide: [
+          '📌 ROI 측정 불필요',
+          '📌 하지만 기록하면 재미있을 수 있음',
+          '📌 예: 여행 → 사진 앨범',
+          '📌 "추억"용 기록은 OK'
+        ]
+      },
+      '💼 프로형': {
+        state: '전문가 수준입니다. 일도 성장도 동시에 관리하고 있습니다.',
+        characteristics: [
+          '✅ 수익 발생 중',
+          '✅ 지속적 성장',
+          '✅ ROI 명확'
+        ],
+        guide: [
+          '📌 현재 방식 유지',
+          '📌 분기별 ROI 리뷰',
+          '📌 시스템 자동화 고려',
+          '📌 팀/후배 멘토링'
+        ]
+      },
+      '📊 개선 필요형': {
+        state: '수익은 있으나, ROI 측정이 부족합니다.',
+        characteristics: [
+          '✅ 수익 발생 중',
+          '⚠️ 성장 측정 부족',
+          '⚠️ 효율성 불명확'
+        ],
+        guide: [
+          '📌 매출/시간 추적 시작',
+          '📌 시간당 수익률 계산',
+          '📌 비효율적 작업 제거',
+          '📌 월별 ROI 리포트'
+        ]
+      },
+      '⚠️ 번아웃 위험형': {
+        state: '위험: 압박만 있고 성과가 불명확합니다.',
+        characteristics: [
+          '🚨 수익화 압박 높음',
+          '🚨 성장 실감 못함',
+          '🚨 소진 위험'
+        ],
+        guide: [
+          '📌 즉시 조치: 휴식 필요',
+          '📌 3개월 전과 지금 비교 (구체적 숫자)',
+          '📌 성장 없으면 방향 전환 고려',
+          '📌 멘토/코치 상담 필수',
+          '📌 1개월 후 재진단'
+        ]
+      },
+      '⚙️ 안정형': {
+        state: '안정적입니다. 현상 유지를 잘하고 있습니다.',
+        characteristics: [
+          '✅ 수익화 압박 있음',
+          '➖ 성장 압박 없음',
+          '✅ 기록 존재'
+        ],
+        guide: [
+          '📌 현재 수준 유지',
+          '📌 효율성 개선 탐색',
+          '📌 자동화 가능 부분 찾기',
+          '📌 분기 1회 체크'
+        ]
+      },
+      '⚠️ 관리 필요형': {
+        state: '주의: 일인데 관리가 안 되고 있습니다.',
+        characteristics: [
+          '⚠️ 수익화 압박 있음',
+          '⚠️ 기록 부족',
+          '⚠️ 통제력 상실 위험'
+        ],
+        guide: [
+          '📌 즉시: 최소 지표 3개 설정',
+          '📌 예: 매출, 작업시간, 고객만족도',
+          '📌 주간 체크인',
+          '📌 2주 후 재진단'
+        ]
+      }
+    };
+
+    return guidanceMap[judgment.type] || {
+      state: '진단 결과를 확인해주세요.',
+      characteristics: [],
+      guide: []
+    };
+  }
+
   async function handleSaveResult() {
     if (!user) {
       alert('저장을 위해 로그인이 필요합니다.');
@@ -237,7 +404,6 @@ export default function ROISelfAssessment() {
       };
       
       if (user.is_local) {
-        // 로컬 저장소에 저장
         const localHistory = JSON.parse(localStorage.getItem('roi_history') || '[]');
         const newAssessment = {
           id: `local_${Date.now()}`,
@@ -257,13 +423,11 @@ export default function ROISelfAssessment() {
         localHistory.push(newAssessment);
         localStorage.setItem('roi_history', JSON.stringify(localHistory));
         
-        // 저장 횟수 증가
         const savedCount = parseInt(localStorage.getItem('roi_save_count') || '0');
         localStorage.setItem('roi_save_count', (savedCount + 1).toString());
         
         alert('✅ 진단 결과가 저장되었습니다!\n\n💡 Tip: 계정 연결하면 여러 기기에서 사용할 수 있어요.');
       } else {
-        // Supabase에 저장
         await db.saveAssessment(user.id, assessmentData);
         alert('✅ 진단 결과가 저장되었습니다!');
       }
@@ -445,7 +609,6 @@ export default function ROISelfAssessment() {
       );
     }
 
-    // 활동별로 그룹화
     const groupedByActivity = {};
     history.forEach(item => {
       if (!groupedByActivity[item.activity_name]) {
@@ -547,7 +710,6 @@ export default function ROISelfAssessment() {
     );
   }
 
-  // 로딩 상태
   if (loading) {
     return (
       <div className="container">
@@ -556,7 +718,6 @@ export default function ROISelfAssessment() {
     );
   }
 
-  // 인증 화면
   if (view === 'auth') {
     return (
       <div className="container">
@@ -565,7 +726,6 @@ export default function ROISelfAssessment() {
     );
   }
 
-  // 히스토리 뷰
   if (view === 'history') {
     return (
       <div className="container">
@@ -574,13 +734,11 @@ export default function ROISelfAssessment() {
     );
   }
 
-  // 진단 뷰
   const step = steps[currentStep];
   const progress = Math.round((currentStep / (steps.length - 1)) * 100);
 
   return (
     <div className="container">
-      {/* 사용자 정보 표시 */}
       <div style={{ 
         position: 'absolute', 
         top: '20px', 
@@ -773,6 +931,27 @@ export default function ROISelfAssessment() {
             <div style={{ textAlign: 'center', marginTop: '10px', fontSize: '14px' }}>
               사분면: <strong>{getQuadrant()}</strong>
             </div>
+          </div>
+
+          {/* 당신의 상태 */}
+          <div className="guide-section guide-1">
+            <h3 style={{ marginBottom: '10px' }}>📋 당신의 상태</h3>
+            <p style={{ lineHeight: '1.8' }}>{getDetailedGuidance().state}</p>
+            <ul style={{ margin: '10px 0 0 20px', lineHeight: '1.8' }}>
+              {getDetailedGuidance().characteristics.map((char, i) => (
+                <li key={i}>{char}</li>
+              ))}
+            </ul>
+          </div>
+
+          {/* 실천 가이드 */}
+          <div className="guide-section guide-2">
+            <h3 style={{ marginBottom: '10px' }}>💡 실천 가이드</h3>
+            <ul style={{ margin: '10px 0 0 20px', lineHeight: '1.8' }}>
+              {getDetailedGuidance().guide.map((item, i) => (
+                <li key={i}>{item}</li>
+              ))}
+            </ul>
           </div>
 
           <div className="nav-buttons">
