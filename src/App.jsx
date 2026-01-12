@@ -5,8 +5,9 @@ import { supabase, auth, db } from './supabaseClient';
 export default function ROISelfAssessment() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState('assessment'); // 'assessment' | 'history'
+  const [view, setView] = useState('assessment'); // 'assessment' | 'history' | 'auth'
   const [history, setHistory] = useState([]);
+  const [showAuthPrompt, setShowAuthPrompt] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
   const [activityName, setActivityName] = useState('');
   const [scores, setScores] = useState({
@@ -67,27 +68,98 @@ export default function ROISelfAssessment() {
     }
   }, [user, view]);
 
+  // 저장 횟수 체크 (3회 이상이면 계정 연결 권장)
+  useEffect(() => {
+    const savedCount = parseInt(localStorage.getItem('roi_save_count') || '0');
+    if (savedCount >= 3 && !user?.email && !showAuthPrompt) {
+      // 익명 사용자가 3회 이상 저장하면 계정 연결 권장
+      setTimeout(() => {
+        if (confirm('🎯 3번째 진단을 완료했습니다!\n\n데이터를 안전하게 보관하고 여러 기기에서 사용하시겠어요?\n\n계정 연결을 추천드립니다.')) {
+          setView('auth');
+        }
+      }, 1000);
+    }
+  }, [user, showAuthPrompt]);
+
   async function checkUser() {
     try {
-      const currentUser = await auth.getCurrentUser();
+      let currentUser = await auth.getCurrentUser();
+      
       if (!currentUser) {
-        const { user: newUser } = await auth.signInAnonymously();
-        setUser(newUser);
-      } else {
-        setUser(currentUser);
+        // 익명 로그인 시도
+        try {
+          const { user: anonymousUser } = await auth.signInAnonymously();
+          currentUser = anonymousUser;
+        } catch (error) {
+          console.error('익명 로그인 실패:', error);
+          // 익명 로그인 실패 시 로컬 스토리지 사용
+          const localUserId = localStorage.getItem('local_user_id') || `local_${Date.now()}`;
+          localStorage.setItem('local_user_id', localUserId);
+          currentUser = { id: localUserId, is_local: true };
+        }
       }
+      
+      setUser(currentUser);
     } catch (error) {
       console.error('인증 오류:', error);
+      // 폴백: 로컬 스토리지 사용
+      const localUserId = localStorage.getItem('local_user_id') || `local_${Date.now()}`;
+      localStorage.setItem('local_user_id', localUserId);
+      setUser({ id: localUserId, is_local: true });
     } finally {
       setLoading(false);
     }
   }
 
+  async function handleGoogleLogin() {
+    try {
+      await auth.signInWithGoogle();
+      alert('✅ Google 로그인 성공!');
+      await checkUser();
+      setView('assessment');
+    } catch (error) {
+      console.error('Google 로그인 오류:', error);
+      alert('Google 로그인에 실패했습니다.');
+    }
+  }
+
+  async function handleKakaoLogin() {
+    try {
+      await auth.signInWithKakao();
+      alert('✅ Kakao 로그인 성공!');
+      await checkUser();
+      setView('assessment');
+    } catch (error) {
+      console.error('Kakao 로그인 오류:', error);
+      alert('Kakao 로그인에 실패했습니다.');
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      await auth.signOut();
+      setUser(null);
+      // 익명으로 다시 시작
+      await checkUser();
+      alert('✅ 로그아웃 완료');
+    } catch (error) {
+      console.error('로그아웃 오류:', error);
+    }
+  }
+
   async function loadHistory() {
     if (!user) return;
+    
     try {
-      const data = await db.getRecentAssessments(user.id, 20);
-      setHistory(data);
+      if (user.is_local) {
+        // 로컬 저장소에서 로드
+        const localHistory = JSON.parse(localStorage.getItem('roi_history') || '[]');
+        setHistory(localHistory.sort((a, b) => new Date(b.assessment_date) - new Date(a.assessment_date)));
+      } else {
+        // Supabase에서 로드
+        const data = await db.getRecentAssessments(user.id, 20);
+        setHistory(data);
+      }
     } catch (error) {
       console.error('히스토리 로드 오류:', error);
     }
@@ -144,7 +216,8 @@ export default function ROISelfAssessment() {
 
   async function handleSaveResult() {
     if (!user) {
-      alert('로그인이 필요합니다.');
+      alert('저장을 위해 로그인이 필요합니다.');
+      setView('auth');
       return;
     }
     
@@ -163,8 +236,37 @@ export default function ROISelfAssessment() {
         judgment: getJudgment()
       };
       
-      await db.saveAssessment(user.id, assessmentData);
-      alert('✅ 진단 결과가 저장되었습니다!');
+      if (user.is_local) {
+        // 로컬 저장소에 저장
+        const localHistory = JSON.parse(localStorage.getItem('roi_history') || '[]');
+        const newAssessment = {
+          id: `local_${Date.now()}`,
+          user_id: user.id,
+          activity_name: assessmentData.activityName,
+          assessment_date: new Date().toISOString(),
+          score_a: assessmentData.scores.A,
+          score_b: assessmentData.scores.B,
+          score_c: assessmentData.scores.C,
+          score_d: assessmentData.scores.D,
+          score_e: assessmentData.scores.E,
+          total_score: assessmentData.totalScore,
+          quadrant: assessmentData.quadrant,
+          judgment_type: assessmentData.judgment.type,
+          judgment_desc: assessmentData.judgment.desc
+        };
+        localHistory.push(newAssessment);
+        localStorage.setItem('roi_history', JSON.stringify(localHistory));
+        
+        // 저장 횟수 증가
+        const savedCount = parseInt(localStorage.getItem('roi_save_count') || '0');
+        localStorage.setItem('roi_save_count', (savedCount + 1).toString());
+        
+        alert('✅ 진단 결과가 저장되었습니다!\n\n💡 Tip: 계정 연결하면 여러 기기에서 사용할 수 있어요.');
+      } else {
+        // Supabase에 저장
+        await db.saveAssessment(user.id, assessmentData);
+        alert('✅ 진단 결과가 저장되었습니다!');
+      }
     } catch (error) {
       console.error('저장 오류:', error);
       alert('저장에 실패했습니다. 다시 시도해주세요.');
@@ -213,12 +315,121 @@ export default function ROISelfAssessment() {
     });
   }
 
+  // 인증 화면
+  function renderAuth() {
+    return (
+      <div>
+        <h1>계정 연결</h1>
+        <p className="subtitle">데이터를 안전하게 보관하고 여러 기기에서 사용하세요</p>
+
+        {user && !user.is_local && (
+          <div className="result-card" style={{ background: '#dcfce7' }}>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '10px' }}>
+                ✅ 로그인 완료
+              </div>
+              <div style={{ fontSize: '14px', color: '#6b7280' }}>
+                {user.email || '익명 사용자'}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {(!user || user.is_local) && (
+          <>
+            <div className="section-title">로그인 방법 선택</div>
+            
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '15px', marginBottom: '20px' }}>
+              <button 
+                className="btn" 
+                onClick={handleGoogleLogin}
+                style={{ 
+                  background: 'white', 
+                  border: '2px solid #e5e7eb',
+                  color: '#374151',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '10px'
+                }}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24">
+                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                </svg>
+                Google로 계속하기
+              </button>
+
+              <button 
+                className="btn" 
+                onClick={handleKakaoLogin}
+                style={{ 
+                  background: '#FEE500', 
+                  color: '#000000',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '10px'
+                }}
+              >
+                <span style={{ fontSize: '20px' }}>💬</span>
+                Kakao로 계속하기
+              </button>
+            </div>
+
+            <div className="guide-section guide-1">
+              <strong>💡 익명 사용 vs 계정 연결</strong>
+              <ul style={{ margin: '10px 0 0 20px', lineHeight: '1.8' }}>
+                <li><strong>익명 사용:</strong> 로그인 없이 바로 시작, 이 기기에만 저장</li>
+                <li><strong>계정 연결:</strong> 여러 기기 동기화, 데이터 안전 보관</li>
+              </ul>
+            </div>
+          </>
+        )}
+
+        <div className="nav-buttons">
+          <button className="btn btn-secondary" onClick={() => setView('assessment')}>
+            ← 돌아가기
+          </button>
+          {user && !user.is_local && (
+            <button className="btn btn-secondary" onClick={handleLogout}>
+              로그아웃
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   // 히스토리 뷰
   function renderHistory() {
     if (history.length === 0) {
       return (
         <div>
           <h1>진단 히스토리</h1>
+          
+          {user?.is_local && (
+            <div className="warning-box" style={{ marginBottom: '20px' }}>
+              💡 현재 이 기기에만 저장되어 있습니다. 
+              <button 
+                onClick={() => setView('auth')}
+                style={{ 
+                  marginLeft: '10px', 
+                  padding: '5px 10px', 
+                  background: '#3b82f6', 
+                  color: 'white', 
+                  border: 'none', 
+                  borderRadius: '4px',
+                  cursor: 'pointer'
+                }}
+              >
+                계정 연결하기
+              </button>
+            </div>
+          )}
+          
           <div className="result-card">
             <p style={{ textAlign: 'center' }}>아직 저장된 진단이 없습니다.</p>
             <p style={{ textAlign: 'center', marginTop: '10px' }}>
@@ -246,6 +457,27 @@ export default function ROISelfAssessment() {
     return (
       <div>
         <h1>진단 히스토리</h1>
+        
+        {user?.is_local && (
+          <div className="warning-box" style={{ marginBottom: '20px' }}>
+            💡 현재 이 기기에만 저장되어 있습니다. 
+            <button 
+              onClick={() => setView('auth')}
+              style={{ 
+                marginLeft: '10px', 
+                padding: '5px 10px', 
+                background: '#3b82f6', 
+                color: 'white', 
+                border: 'none', 
+                borderRadius: '4px',
+                cursor: 'pointer'
+              }}
+            >
+              계정 연결하기
+            </button>
+          </div>
+        )}
+        
         <div className="nav-buttons" style={{ marginBottom: '20px' }}>
           <button className="btn btn-secondary" onClick={() => setView('assessment')}>
             ← 새 진단
@@ -273,40 +505,40 @@ export default function ROISelfAssessment() {
               </div>
 
               {items.length > 1 && (
-                <div style={{ marginTop: '15px' }}>
-                  <strong>과거 기록 ({items.length - 1}개)</strong>
-                  <div style={{ display: 'grid', gap: '10px', marginTop: '10px' }}>
-                    {items.slice(1).map((item, index) => (
-                      <div key={item.id} className="question-box" style={{ padding: '12px' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <div>
-                            <div style={{ fontSize: '14px', fontWeight: '500' }}>
-                              {formatDate(item.assessment_date)}
+                <>
+                  <div style={{ marginTop: '15px' }}>
+                    <strong>과거 기록 ({items.length - 1}개)</strong>
+                    <div style={{ display: 'grid', gap: '10px', marginTop: '10px' }}>
+                      {items.slice(1).map((item) => (
+                        <div key={item.id} className="question-box" style={{ padding: '12px' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <div>
+                              <div style={{ fontSize: '14px', fontWeight: '500' }}>
+                                {formatDate(item.assessment_date)}
+                              </div>
+                              <div style={{ fontSize: '12px', color: '#6b7280' }}>
+                                {item.judgment_type}
+                              </div>
                             </div>
-                            <div style={{ fontSize: '12px', color: '#6b7280' }}>
-                              {item.judgment_type}
+                            <div style={{ fontSize: '18px', fontWeight: 'bold', color: '#3b82f6' }}>
+                              {item.total_score}점
                             </div>
-                          </div>
-                          <div style={{ fontSize: '18px', fontWeight: 'bold', color: '#3b82f6' }}>
-                            {item.total_score}점
                           </div>
                         </div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
 
-              {items.length >= 2 && (
-                <div style={{ marginTop: '15px', padding: '12px', background: '#f0f9ff', borderRadius: '8px' }}>
-                  <strong>변화 분석</strong>
-                  <div style={{ marginTop: '8px', fontSize: '14px' }}>
-                    총점 변화: {items[items.length - 1].total_score}점 → {items[0].total_score}점 
-                    <span style={{ color: items[0].total_score >= items[items.length - 1].total_score ? '#22c55e' : '#ef4444', fontWeight: 'bold', marginLeft: '8px' }}>
-                      ({items[0].total_score >= items[items.length - 1].total_score ? '+' : ''}{items[0].total_score - items[items.length - 1].total_score})
-                    </span>
+                  <div style={{ marginTop: '15px', padding: '12px', background: '#f0f9ff', borderRadius: '8px' }}>
+                    <strong>변화 분석</strong>
+                    <div style={{ marginTop: '8px', fontSize: '14px' }}>
+                      총점 변화: {items[items.length - 1].total_score}점 → {items[0].total_score}점 
+                      <span style={{ color: items[0].total_score >= items[items.length - 1].total_score ? '#22c55e' : '#ef4444', fontWeight: 'bold', marginLeft: '8px' }}>
+                        ({items[0].total_score >= items[items.length - 1].total_score ? '+' : ''}{items[0].total_score - items[items.length - 1].total_score})
+                      </span>
+                    </div>
                   </div>
-                </div>
+                </>
               )}
             </div>
           );
@@ -320,6 +552,15 @@ export default function ROISelfAssessment() {
     return (
       <div className="container">
         <h1>로딩 중...</h1>
+      </div>
+    );
+  }
+
+  // 인증 화면
+  if (view === 'auth') {
+    return (
+      <div className="container">
+        {renderAuth()}
       </div>
     );
   }
@@ -339,8 +580,38 @@ export default function ROISelfAssessment() {
 
   return (
     <div className="container">
+      {/* 사용자 정보 표시 */}
+      <div style={{ 
+        position: 'absolute', 
+        top: '20px', 
+        right: '20px',
+        display: 'flex',
+        gap: '10px',
+        alignItems: 'center'
+      }}>
+        {user && (
+          <span style={{ fontSize: '12px', color: '#6b7280' }}>
+            {user.is_local ? '익명 사용 중' : user.email}
+          </span>
+        )}
+        <button 
+          onClick={() => setView('auth')}
+          style={{
+            padding: '6px 12px',
+            fontSize: '12px',
+            background: user?.is_local ? '#3b82f6' : '#e5e7eb',
+            color: user?.is_local ? 'white' : '#374151',
+            border: 'none',
+            borderRadius: '6px',
+            cursor: 'pointer'
+          }}
+        >
+          {user?.is_local ? '계정 연결' : '계정'}
+        </button>
+      </div>
+
       {currentStep > 0 && (
-        <div style={{ marginBottom: '20px' }}>
+        <div style={{ marginBottom: '20px', marginTop: '40px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#6b7280', marginBottom: '10px' }}>
             <span>진행률</span>
             <span>{progress}%</span>
