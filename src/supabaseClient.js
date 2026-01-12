@@ -15,6 +15,30 @@ export const auth = {
     return data
   },
   
+  // Google 로그인
+  async signInWithGoogle() {
+    const { data, error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: window.location.origin
+      }
+    })
+    if (error) throw error
+    return data
+  },
+  
+  // Kakao 로그인
+  async signInWithKakao() {
+    const { data, error } = await supabase.auth.signInWithOAuth({
+      provider: 'kakao',
+      options: {
+        redirectTo: window.location.origin
+      }
+    })
+    if (error) throw error
+    return data
+  },
+  
   // 현재 사용자 가져오기
   async getCurrentUser() {
     const { data: { user } } = await supabase.auth.getUser()
@@ -87,5 +111,40 @@ export const db = {
       .eq('id', assessmentId)
     
     if (error) throw error
+  },
+  
+  // 로컬 데이터를 Supabase로 마이그레이션
+  async migrateLocalData(userId) {
+    const localHistory = JSON.parse(localStorage.getItem('roi_history') || '[]')
+    
+    if (localHistory.length === 0) return { migrated: 0 }
+    
+    const migratedData = localHistory.map(item => ({
+      user_id: userId,
+      activity_name: item.activity_name,
+      assessment_date: item.assessment_date,
+      score_a: item.score_a,
+      score_b: item.score_b,
+      score_c: item.score_c,
+      score_d: item.score_d,
+      score_e: item.score_e,
+      total_score: item.total_score,
+      quadrant: item.quadrant,
+      judgment_type: item.judgment_type,
+      judgment_desc: item.judgment_desc
+    }))
+    
+    const { data, error } = await supabase
+      .from('assessments')
+      .insert(migratedData)
+      .select()
+    
+    if (error) throw error
+    
+    // 마이그레이션 성공 시 로컬 데이터 삭제
+    localStorage.removeItem('roi_history')
+    localStorage.setItem('roi_save_count', '0')
+    
+    return { migrated: data.length }
   }
 }
